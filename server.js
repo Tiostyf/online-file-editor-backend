@@ -44,20 +44,21 @@ app.use(cors({
       callback(new Error('Not allowed by CORS'));
     }
   },
-  credentials: true
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
 app.use(express.json({ limit: '150mb' }));
 app.use(express.urlencoded({ extended: true, limit: '150mb' }));
 app.use(compression());
 
-// ========== STATIC FOLDERS (not served publicly anymore) ==========
+// ========== STATIC FOLDERS ==========
 const uploadDir = path.join(__dirname, 'uploads');
 const processedDir = path.join(__dirname, 'processed');
 [uploadDir, processedDir].forEach(dir => {
   if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
-// ❌ REMOVED public static serving – now handled by authenticated routes
 
 // ========== MONGODB CONNECTION ==========
 const mongoUri = process.env.MONGODB_URI;
@@ -82,7 +83,7 @@ const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true, minlength: 3 },
   email:    { type: String, required: true, unique: true, lowercase: true },
   password: { type: String, required: true },
-  role:     { type: String, enum: ['user', 'admin'], default: 'user' }, // 👈 ADDED role
+  role:     { type: String, enum: ['user', 'admin'], default: 'user' },
   profile:  { type: Object, default: {} },
   preferences: {
     type: Object,
@@ -109,27 +110,25 @@ const fileSchema = new mongoose.Schema({
   downloadCount:  { type: Number, default: 0 },
   compressionRatio: Number,
   toolUsed:       String,
-  ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }
+  ownerId:        { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }
 }, { timestamps: true });
 
-// 🔹 NEW: Temporary upload model for preview
 const uploadSchema = new mongoose.Schema({
   filename:       { type: String, required: true },
   originalName:   { type: String, required: true },
   size:           { type: Number, required: true },
   mimeType:       { type: String, required: true },
   ownerId:        { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  expiresAt:      { type: Date, default: () => Date.now() + 60 * 60 * 1000 } // 1 hour TTL
+  expiresAt:      { type: Date, default: () => Date.now() + 60 * 60 * 1000 }
 }, { timestamps: true });
 
-// Index for automatic MongoDB TTL deletion (optional but useful)
 uploadSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 const User = mongoose.model('User', userSchema);
 const File = mongoose.model('File', fileSchema);
 const Upload = mongoose.model('Upload', uploadSchema);
 
-// ========== MULTER ==========
+// ========== MULTER CONFIGURATION ==========
 const storage = multer.diskStorage({
   destination: (req, file, cb) => cb(null, uploadDir),
   filename: (req, file, cb) => {
@@ -137,6 +136,7 @@ const storage = multer.diskStorage({
     cb(null, `${Date.now()}-${Math.random().toString(36).substr(2, 9)}-${safe}`);
   }
 });
+
 const upload = multer({
   storage,
   limits: { fileSize: 150 * 1024 * 1024 },
@@ -146,20 +146,29 @@ const upload = multer({
 // ========== AUTH MIDDLEWARE ==========
 const auth = async (req, res, next) => {
   try {
+    let token = null;
+    
+    // Check Authorization header
     const authHeader = req.header('Authorization');
-    if (!authHeader) {
-      return res.status(401).json({ success: false, message: 'No authorization header' });
+    if (authHeader) {
+      if (authHeader.startsWith('Bearer ')) {
+        token = authHeader.slice(7).trim();
+      } else {
+        token = authHeader.trim();
+      }
+    }
+    
+    // Check query parameter (for downloads)
+    if (!token && req.query.token) {
+      token = req.query.token;
+    }
+    
+    if (!token) {
+      return res.status(401).json({ success: false, message: 'No authorization header or token' });
     }
 
-    let token;
-    if (authHeader.startsWith('Bearer ')) {
-      token = authHeader.slice(7).trim();
-    } else {
-      token = authHeader.trim();
-    }
-
-    if (!token || token === 'null' || token === 'undefined' || token === '') {
-      return res.status(401).json({ success: false, message: 'Token is empty' });
+    if (token === 'null' || token === 'undefined' || token === '') {
+      return res.status(401).json({ success: false, message: 'Invalid token' });
     }
 
     const tokenParts = token.split('.');
@@ -188,7 +197,6 @@ const auth = async (req, res, next) => {
   }
 };
 
-// 👇 NEW: Admin middleware – must be used after auth
 const adminOnly = (req, res, next) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ success: false, message: 'Admin access required' });
@@ -196,7 +204,7 @@ const adminOnly = (req, res, next) => {
   next();
 };
 
-// ========== HELPER ==========
+// ========== HELPER FUNCTIONS ==========
 const updateStats = async (userId, orig, comp) => {
   const user = await User.findById(userId);
   if (!user) return;
@@ -209,6 +217,22 @@ const updateStats = async (userId, orig, comp) => {
 
   user.stats = stats;
   await user.save();
+};
+
+const getContentType = (filename) => {
+  const ext = path.extname(filename).toLowerCase();
+  const types = {
+    '.jpg': 'image/jpeg',
+    '.jpeg': 'image/jpeg',
+    '.png': 'image/png',
+    '.webp': 'image/webp',
+    '.pdf': 'application/pdf',
+    '.zip': 'application/zip',
+    '.mp3': 'audio/mpeg',
+    '.wav': 'audio/wav',
+    '.mp4': 'video/mp4'
+  };
+  return types[ext] || 'application/octet-stream';
 };
 
 // ========== API ROUTES ==========
@@ -246,7 +270,7 @@ app.post('/api/register', async (req, res) => {
       username,
       email: email.toLowerCase(),
       password: hashed,
-      role: 'user', // default role
+      role: 'user',
       profile: { fullName, company }
     });
 
@@ -263,7 +287,7 @@ app.post('/api/register', async (req, res) => {
         id: user._id,
         username: user.username,
         email: user.email,
-        role: user.role, // 👈 include role
+        role: user.role,
         profile: user.profile,
         stats: user.stats,
         preferences: user.preferences
@@ -306,7 +330,7 @@ app.post('/api/login', async (req, res) => {
         id: user._id,
         username: user.username,
         email: user.email,
-        role: user.role, // 👈 include role
+        role: user.role,
         profile: user.profile,
         stats: user.stats,
         preferences: user.preferences
@@ -336,7 +360,7 @@ app.get('/api/profile', auth, async (req, res) => {
         id: req.user._id,
         username: req.user.username,
         email: req.user.email,
-        role: req.user.role, // 👈 include role
+        role: req.user.role,
         profile: req.user.profile,
         preferences: req.user.preferences,
         stats
@@ -390,7 +414,7 @@ app.put('/api/profile', auth, async (req, res) => {
         id: user._id,
         username: user.username,
         email: user.email,
-        role: user.role, // 👈 include role
+        role: user.role,
         profile: user.profile,
         preferences: user.preferences,
         stats
@@ -404,7 +428,7 @@ app.put('/api/profile', auth, async (req, res) => {
 
 // ========== AUTHENTICATED FILE SERVING ==========
 
-// Serve temporary upload files (for preview) – only owner can access
+// Serve temporary upload files (for preview)
 app.get('/api/uploads/:filename', auth, async (req, res) => {
   try {
     const filename = req.params.filename;
@@ -427,7 +451,7 @@ app.get('/api/uploads/:filename', auth, async (req, res) => {
   }
 });
 
-// Serve processed files (permanent) – only owner can access
+// Serve processed files (permanent)
 app.get('/api/processed/:filename', auth, async (req, res) => {
   try {
     const filename = req.params.filename;
@@ -450,7 +474,68 @@ app.get('/api/processed/:filename', auth, async (req, res) => {
   }
 });
 
-// ----- PROCESS FILES -----
+// ----- DOWNLOAD FILE (UPDATED WITH BETTER AUTH) -----
+app.get('/api/download/:filename', auth, async (req, res) => {
+  try {
+    const filename = req.params.filename;
+    
+    // Security: Prevent directory traversal
+    const safeFilename = path.basename(filename);
+    const filePath = path.join(processedDir, safeFilename);
+
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ success: false, message: 'File not found' });
+    }
+
+    // Find the file in database and verify ownership
+    const file = await File.findOne({ filename: safeFilename, ownerId: req.user._id });
+    
+    if (!file) {
+      return res.status(403).json({ success: false, message: 'You do not have permission to download this file' });
+    }
+
+    // Increment download count
+    file.downloadCount += 1;
+    await file.save();
+
+    // Update user stats
+    const user = await User.findById(req.user._id);
+    if (user) {
+      const stats = { ...user.stats };
+      stats.totalDownloads = (stats.totalDownloads || 0) + 1;
+      user.stats = stats;
+      await user.save();
+    }
+
+    // Get file stats for content length
+    const stats = fs.statSync(filePath);
+    
+    // Set headers for download
+    res.setHeader('Content-Type', getContentType(safeFilename));
+    res.setHeader('Content-Disposition', `attachment; filename="${file.originalName}"`);
+    res.setHeader('Content-Length', stats.size);
+    res.setHeader('Cache-Control', 'no-cache, no-store, must-revalidate');
+    res.setHeader('Pragma', 'no-cache');
+    res.setHeader('Expires', '0');
+    
+    // Stream the file
+    const fileStream = fs.createReadStream(filePath);
+    fileStream.pipe(res);
+    
+    fileStream.on('error', (error) => {
+      console.error('Error streaming file:', error);
+      if (!res.headersSent) {
+        res.status(500).json({ success: false, message: 'Error downloading file' });
+      }
+    });
+    
+  } catch (e) {
+    console.error('Download error:', e);
+    res.status(500).json({ success: false, message: 'Download failed' });
+  }
+});
+
+// ----- PROCESS FILES (FIXED - ONLY ONE FEATURE AT A TIME) -----
 app.post('/api/process', auth, upload.array('files'), async (req, res) => {
   try {
     const files = req.files;
@@ -468,18 +553,16 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
       });
     }
 
-    // ---------- PREVIEW BRANCH (UPDATED) ----------
+    // PREVIEW TOOL
     if (tool === 'preview') {
       const fileInfo = [];
       for (const f of files) {
-        // Store metadata in temporary Upload collection
         const upload = await Upload.create({
           filename: f.filename,
           originalName: f.originalname,
           size: f.size,
           mimeType: f.mimetype,
           ownerId: req.user._id
-          // expiresAt uses default (1 hour)
         });
 
         fileInfo.push({
@@ -487,12 +570,11 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
           name: upload.originalName,
           size: upload.size,
           type: upload.mimeType,
-          url: `/api/uploads/${upload.filename}`,   // authenticated URL
+          url: `/api/uploads/${upload.filename}`,
           expiresAt: upload.expiresAt
         });
       }
 
-      // Do NOT delete the files here; they will be cleaned up by TTL/background job
       return res.json({
         success: true,
         files: fileInfo,
@@ -500,29 +582,11 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
       });
     }
 
-    // ---------- PROCESSING TOOLS (compress, merge, convert, enhance) ----------
-    if (tool === 'merge' && files.length < 2) {
-      return res.status(400).json({ success: false, message: 'Merge requires at least 2 files' });
-    }
-
-    if (['convert', 'enhance'].includes(tool) && files.length !== 1) {
-      return res.status(400).json({
-        success: false,
-        message: `${tool.charAt(0).toUpperCase() + tool.slice(1)} requires exactly 1 file`
-      });
-    }
-
-    if (tool === 'convert' && !format) {
-      return res.status(400).json({ success: false, message: 'Format is required for conversion' });
-    }
-
-    let outPath, mime, compSize;
-    const origSize = files.reduce((s, f) => s + f.size, 0);
-    let fileName = '';
-
+    // COMPRESS TOOL - ONLY COMPRESS, NO OTHER FEATURES
     if (tool === 'compress') {
+      // Validate: compress only works with one file or multiple files (creates zip)
       const level = Math.max(1, Math.min(9, parseInt(compressLevel) || 6));
-      outPath = path.join(processedDir, `${Date.now()}-compressed.zip`);
+      const outPath = path.join(processedDir, `${Date.now()}-compressed.zip`);
       const output = fs.createWriteStream(outPath);
       const archive = archiver('zip', { zlib: { level } });
 
@@ -534,13 +598,44 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
         archive.finalize();
       });
 
-      compSize = fs.statSync(outPath).size;
-      fileName = files.length === 1
+      const compSize = fs.statSync(outPath).size;
+      const origSize = files.reduce((s, f) => s + f.size, 0);
+      const fileName = files.length === 1
         ? `${path.parse(files[0].originalname).name}_compressed.zip`
         : `batch_${Date.now()}.zip`;
-      mime = 'application/zip';
+      const mime = 'application/zip';
 
-    } else if (tool === 'merge') {
+      // Save to database
+      const processed = await File.create({
+        filename: path.basename(outPath),
+        originalName: fileName,
+        size: origSize,
+        compressedSize: compSize,
+        type: mime,
+        ownerId: req.user._id,
+        compressionRatio: origSize > 0 ? Number(((origSize - compSize) / origSize * 100).toFixed(2)) : 0,
+        toolUsed: 'compress'
+      });
+
+      await updateStats(req.user._id, origSize, compSize);
+
+      return res.json({
+        success: true,
+        url: `/api/processed/${path.basename(outPath)}`,
+        fileName,
+        size: compSize,
+        originalSize: origSize,
+        savings: origSize - compSize,
+        tool: 'compress'
+      });
+    }
+
+    // MERGE TOOL - ONLY MERGE PDFs
+    if (tool === 'merge') {
+      if (files.length < 2) {
+        return res.status(400).json({ success: false, message: 'Merge requires at least 2 files' });
+      }
+
       const nonPdfFiles = files.filter(f => f.mimetype !== 'application/pdf');
       if (nonPdfFiles.length > 0) {
         return res.status(400).json({
@@ -551,6 +646,7 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
 
       const pdfDoc = await PDFDocument.create();
       const orderArr = order ? JSON.parse(order) : files.map(f => f.originalname);
+      const origSize = files.reduce((s, f) => s + f.size, 0);
 
       for (const name of orderArr) {
         const file = files.find(f => f.originalname === name);
@@ -563,16 +659,51 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
       }
 
       const pdfBytes = await pdfDoc.save();
-      outPath = path.join(processedDir, `${Date.now()}-merged.pdf`);
+      const outPath = path.join(processedDir, `${Date.now()}-merged.pdf`);
       fs.writeFileSync(outPath, pdfBytes);
-      compSize = pdfBytes.length;
-      fileName = 'merged.pdf';
-      mime = 'application/pdf';
+      const compSize = pdfBytes.length;
+      const fileName = 'merged.pdf';
+      const mime = 'application/pdf';
 
-    } else if (tool === 'convert') {
+      const processed = await File.create({
+        filename: path.basename(outPath),
+        originalName: fileName,
+        size: origSize,
+        compressedSize: compSize,
+        type: mime,
+        ownerId: req.user._id,
+        compressionRatio: origSize > 0 ? Number(((origSize - compSize) / origSize * 100).toFixed(2)) : 0,
+        toolUsed: 'merge'
+      });
+
+      await updateStats(req.user._id, origSize, compSize);
+
+      return res.json({
+        success: true,
+        url: `/api/processed/${path.basename(outPath)}`,
+        fileName,
+        size: compSize,
+        originalSize: origSize,
+        savings: origSize - compSize,
+        tool: 'merge'
+      });
+    }
+
+    // CONVERT TOOL - ONLY CONVERT ONE FILE
+    if (tool === 'convert') {
+      if (files.length !== 1) {
+        return res.status(400).json({
+          success: false,
+          message: 'Convert requires exactly 1 file'
+        });
+      }
+
+      if (!format) {
+        return res.status(400).json({ success: false, message: 'Format is required for conversion' });
+      }
+
       const file = files[0];
       const ext = format.toLowerCase();
-
       const validImageFormats = ['jpg', 'jpeg', 'png', 'webp'];
       const validAudioFormats = ['mp3', 'wav'];
 
@@ -583,7 +714,8 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
         });
       }
 
-      outPath = path.join(processedDir, `${Date.now()}-converted.${ext}`);
+      const outPath = path.join(processedDir, `${Date.now()}-converted.${ext}`);
+      let mime;
 
       if (validImageFormats.includes(ext)) {
         await sharp(file.path)
@@ -595,12 +727,44 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
         mime = `audio/${ext}`;
       }
 
-      compSize = fs.statSync(outPath).size;
-      fileName = `${path.parse(file.originalname).name}_converted.${ext}`;
+      const compSize = fs.statSync(outPath).size;
+      const origSize = file.size;
+      const fileName = `${path.parse(file.originalname).name}_converted.${ext}`;
 
-    } else if (tool === 'enhance') {
+      const processed = await File.create({
+        filename: path.basename(outPath),
+        originalName: fileName,
+        size: origSize,
+        compressedSize: compSize,
+        type: mime,
+        ownerId: req.user._id,
+        compressionRatio: origSize > 0 ? Number(((origSize - compSize) / origSize * 100).toFixed(2)) : 0,
+        toolUsed: 'convert'
+      });
+
+      await updateStats(req.user._id, origSize, compSize);
+
+      return res.json({
+        success: true,
+        url: `/api/processed/${path.basename(outPath)}`,
+        fileName,
+        size: compSize,
+        originalSize: origSize,
+        savings: origSize - compSize,
+        tool: 'convert'
+      });
+    }
+
+    // ENHANCE TOOL - ONLY ENHANCE ONE IMAGE
+    if (tool === 'enhance') {
+      if (files.length !== 1) {
+        return res.status(400).json({
+          success: false,
+          message: 'Enhance requires exactly 1 file'
+        });
+      }
+
       const file = files[0];
-
       if (!file.mimetype.startsWith('image/')) {
         return res.status(400).json({
           success: false,
@@ -608,7 +772,7 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
         });
       }
 
-      outPath = path.join(processedDir, `${Date.now()}-enhanced.webp`);
+      const outPath = path.join(processedDir, `${Date.now()}-enhanced.webp`);
       await sharp(file.path)
         .rotate()
         .sharpen()
@@ -616,34 +780,34 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
         .webp({ quality: 90 })
         .toFile(outPath);
 
-      compSize = fs.statSync(outPath).size;
-      fileName = `${path.parse(file.originalname).name}_enhanced.webp`;
-      mime = 'image/webp';
+      const compSize = fs.statSync(outPath).size;
+      const origSize = file.size;
+      const fileName = `${path.parse(file.originalname).name}_enhanced.webp`;
+      const mime = 'image/webp';
+
+      const processed = await File.create({
+        filename: path.basename(outPath),
+        originalName: fileName,
+        size: origSize,
+        compressedSize: compSize,
+        type: mime,
+        ownerId: req.user._id,
+        compressionRatio: origSize > 0 ? Number(((origSize - compSize) / origSize * 100).toFixed(2)) : 0,
+        toolUsed: 'enhance'
+      });
+
+      await updateStats(req.user._id, origSize, compSize);
+
+      return res.json({
+        success: true,
+        url: `/api/processed/${path.basename(outPath)}`,
+        fileName,
+        size: compSize,
+        originalSize: origSize,
+        savings: origSize - compSize,
+        tool: 'enhance'
+      });
     }
-
-    // Save processed file metadata in permanent File collection
-    const processed = await File.create({
-      filename: path.basename(outPath),
-      originalName: fileName,
-      size: origSize,
-      compressedSize: compSize,
-      type: mime,
-      ownerId: req.user._id,
-      compressionRatio: origSize > 0 ? Number(((origSize - compSize) / origSize * 100).toFixed(2)) : 0,
-      toolUsed: tool
-    });
-
-    await updateStats(req.user._id, origSize, compSize);
-
-    res.json({
-      success: true,
-      url: `/api/processed/${path.basename(outPath)}`, // authenticated URL
-      fileName,
-      size: compSize,
-      originalSize: origSize,
-      savings: origSize - compSize,
-      tool: tool
-    });
 
   } catch (e) {
     console.error('Process error:', e);
@@ -652,11 +816,13 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
       message: e.message || 'File processing failed'
     });
   } finally {
-    // Clean up the uploaded files from disk (they are no longer needed)
+    // Clean up uploaded files
     if (req.files) {
       req.files.forEach(f => {
         try {
-          fs.unlinkSync(f.path);
+          if (fs.existsSync(f.path)) {
+            fs.unlinkSync(f.path);
+          }
         } catch (cleanupError) {
           console.warn('Cleanup error:', cleanupError.message);
         }
@@ -691,40 +857,7 @@ app.get('/api/history', auth, async (req, res) => {
   }
 });
 
-// ----- DOWNLOAD FILE (forces download) -----
-app.get('/api/download/:filename', auth, async (req, res) => {
-  try {
-    const filename = req.params.filename;
-    const filePath = path.join(processedDir, filename);
-
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ success: false, message: 'File not found' });
-    }
-
-    const file = await File.findOne({ filename, ownerId: req.user._id });
-    if (file) {
-      file.downloadCount += 1;
-      await file.save();
-    }
-
-    const user = await User.findById(req.user._id);
-    if (user) {
-      const stats = { ...user.stats };
-      stats.totalDownloads = (stats.totalDownloads || 0) + 1;
-      user.stats = stats;
-      await user.save();
-    }
-
-    res.download(filePath);
-  } catch (e) {
-    console.error('Download error:', e);
-    res.status(500).json({ success: false, message: 'Download failed' });
-  }
-});
-
-// ========== ADMIN ROUTES (NEW) ==========
-
-// Get all users (admin only)
+// ========== ADMIN ROUTES ==========
 app.get('/api/admin/users', auth, adminOnly, async (req, res) => {
   try {
     const users = await User.find().select('-password').sort({ createdAt: -1 });
@@ -735,25 +868,22 @@ app.get('/api/admin/users', auth, adminOnly, async (req, res) => {
   }
 });
 
-// Get all file processes (admin only) – includes user email via population
 app.get('/api/admin/file-processes', auth, adminOnly, async (req, res) => {
   try {
-    // Fetch all files and populate ownerId to get user email
     const processes = await File.find()
-      .populate('ownerId', 'email username') // get email and username from User
+      .populate('ownerId', 'email username')
       .sort({ createdAt: -1 });
 
-    // Transform to match expected structure for admin frontend
     const formatted = processes.map(proc => ({
       id: proc._id,
       userEmail: proc.ownerId?.email || 'Unknown',
       userName: proc.ownerId?.username || 'Unknown',
       fileName: proc.originalName,
       fileType: proc.type,
-      originalSize: (proc.size / (1024 * 1024)).toFixed(2), // bytes to MB
+      originalSize: (proc.size / (1024 * 1024)).toFixed(2),
       compressedSize: (proc.compressedSize / (1024 * 1024)).toFixed(2),
       processDate: proc.createdAt,
-      status: 'Completed', // all processed files are completed
+      status: 'Completed',
       tool: proc.toolUsed
     }));
 
@@ -764,16 +894,11 @@ app.get('/api/admin/file-processes', auth, adminOnly, async (req, res) => {
   }
 });
 
-// ========== BACKGROUND CLEANUP OF EXPIRED UPLOADS ==========
-// Runs every hour to delete files older than 1 hour from disk
-// (MongoDB TTL will remove the documents automatically)
-const CLEANUP_INTERVAL = 60 * 60 * 1000; // 1 hour
+// ========== BACKGROUND CLEANUP ==========
+const CLEANUP_INTERVAL = 60 * 60 * 1000;
 setInterval(async () => {
   try {
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
-    
-    // Find upload documents older than 1 hour (they should already be removed by TTL,
-    // but we also clean up orphaned files just in case)
     const expiredUploads = await Upload.find({ createdAt: { $lt: oneHourAgo } });
     
     for (const upload of expiredUploads) {
@@ -782,18 +907,14 @@ setInterval(async () => {
         fs.unlinkSync(filePath);
         console.log(`🧹 Deleted expired upload file: ${upload.filename}`);
       }
-      // Also remove the document (in case TTL didn't fire)
       await upload.deleteOne();
     }
 
-    // Additionally, scan the upload directory for files older than 1 hour
-    // that are not in the Upload collection (orphans)
     const files = await fs.promises.readdir(uploadDir);
     for (const file of files) {
       const filePath = path.join(uploadDir, file);
       const stat = await fs.promises.stat(filePath);
       if (stat.isFile() && (Date.now() - stat.mtimeMs) > 60 * 60 * 1000) {
-        // Check if it's still referenced in Upload
         const upload = await Upload.findOne({ filename: file });
         if (!upload) {
           await fs.promises.unlink(filePath);
@@ -806,12 +927,10 @@ setInterval(async () => {
   }
 }, CLEANUP_INTERVAL);
 
-// ========== NO CATCH‑ALL ROUTE (API ONLY) ==========
-
 // ========== START SERVER ==========
 const PORT = process.env.PORT || 5001;
 app.listen(PORT, () => {
-  console.log('\n🚀Online-File-Editor Backend STARTED (MongoDB, API‑only mode)');
+  console.log('\n🚀 Online-File-Editor Backend STARTED');
   console.log(`   http://localhost:${PORT}`);
   console.log(`   Health check: http://localhost:${PORT}/api/health`);
-}); 
+});
