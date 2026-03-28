@@ -20,69 +20,49 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const app = express();
 
-// ========== CORS CONFIGURATION ==========
+// ========== MIDDLEWARE ==========
 const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:5174',
-  'http://localhost:3000',
-  'https://online-file-editor-frontend-hegh.onrender.com',
-  'https://online-file-editor-backend-1.onrender.com'
+  "https://online-file-editor-frontend.onrender.com",
+  "https://online-file-editor-backend.onrender.com",
 ];
 
-// Add production frontend URL if provided
 if (process.env.CLIENT_URL) {
   allowedOrigins.push(process.env.CLIENT_URL);
 }
 if (process.env.RENDER_EXTERNAL_URL) {
-  allowedOrigins.push(`https://${process.env.RENDER_EXTERNAL_URL}`);
+  allowedOrigins.push(process.env.RENDER_EXTERNAL_URL);
 }
 
-// CORS middleware
 app.use(cors({
   origin: function (origin, callback) {
-    // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
-    
     if (allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
-      console.warn(`CORS blocked request from: ${origin}`);
       callback(new Error('Not allowed by CORS'));
     }
   },
-  credentials: true,
-  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization']
+  credentials: true
 }));
-
-// Handle preflight requests
-app.options('/*', (req, res) => {
-  res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
-  res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
-  res.header('Access-Control-Allow-Headers', 'Content-Type, Authorization');
-  res.header('Access-Control-Allow-Credentials', 'true');
-  res.sendStatus(200);
-});
 
 app.use(express.json({ limit: '150mb' }));
 app.use(express.urlencoded({ extended: true, limit: '150mb' }));
 app.use(compression());
 
-// ========== STATIC FOLDERS ==========
+// ========== STATIC FOLDERS (not served publicly anymore) ==========
 const uploadDir = path.join(__dirname, 'uploads');
 const processedDir = path.join(__dirname, 'processed');
-
 [uploadDir, processedDir].forEach(dir => {
-  if (!fs.existsSync(dir)) {
-    fs.mkdirSync(dir, { recursive: true });
-    console.log(`📁 Created directory: ${dir}`);
-  }
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
 });
+// ❌ REMOVED public static serving – now handled by authenticated routes
 
 // ========== MONGODB CONNECTION ==========
 const mongoUri = process.env.MONGODB_URI;
 if (!mongoUri) {
-  console.error('❌ MONGODB_URI is not defined in environment variables');
+  console.error('❌ MONGODB_URI is not defined in .env');
   process.exit(1);
 }
 
@@ -90,10 +70,8 @@ dns.setServers(['8.8.8.8', '8.8.4.4']);
 
 mongoose.connect(mongoUri, {
   family: 4,
-  serverSelectionTimeoutMS: 5000,
-  socketTimeoutMS: 45000
 })
-  .then(() => console.log('✅ MongoDB Connected Successfully'))
+  .then(() => console.log('✅ MongoDB Connected'))
   .catch(err => {
     console.error('❌ MongoDB error:', err.message);
     process.exit(1);
@@ -102,10 +80,10 @@ mongoose.connect(mongoUri, {
 // ========== MONGOOSE MODELS ==========
 const userSchema = new mongoose.Schema({
   username: { type: String, required: true, unique: true, minlength: 3 },
-  email: { type: String, required: true, unique: true, lowercase: true },
+  email:    { type: String, required: true, unique: true, lowercase: true },
   password: { type: String, required: true },
-  role: { type: String, enum: ['user', 'admin'], default: 'user' },
-  profile: { type: Object, default: {} },
+  role:     { type: String, enum: ['user', 'admin'], default: 'user' }, // 👈 ADDED role
+  profile:  { type: Object, default: {} },
   preferences: {
     type: Object,
     default: { theme: 'light', notifications: true }
@@ -123,26 +101,28 @@ const userSchema = new mongoose.Schema({
 }, { timestamps: true });
 
 const fileSchema = new mongoose.Schema({
-  filename: { type: String, required: true },
-  originalName: { type: String, required: true },
-  size: { type: Number, required: true },
+  filename:       { type: String, required: true },
+  originalName:   { type: String, required: true },
+  size:           { type: Number, required: true },
   compressedSize: { type: Number, required: true },
-  type: { type: String, required: true },
-  downloadCount: { type: Number, default: 0 },
+  type:           { type: String, required: true },
+  downloadCount:  { type: Number, default: 0 },
   compressionRatio: Number,
-  toolUsed: String,
+  toolUsed:       String,
   ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true }
 }, { timestamps: true });
 
+// 🔹 NEW: Temporary upload model for preview
 const uploadSchema = new mongoose.Schema({
-  filename: { type: String, required: true },
-  originalName: { type: String, required: true },
-  size: { type: Number, required: true },
-  mimeType: { type: String, required: true },
-  ownerId: { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
-  expiresAt: { type: Date, default: () => Date.now() + 60 * 60 * 1000 }
+  filename:       { type: String, required: true },
+  originalName:   { type: String, required: true },
+  size:           { type: Number, required: true },
+  mimeType:       { type: String, required: true },
+  ownerId:        { type: mongoose.Schema.Types.ObjectId, ref: 'User', required: true },
+  expiresAt:      { type: Date, default: () => Date.now() + 60 * 60 * 1000 } // 1 hour TTL
 }, { timestamps: true });
 
+// Index for automatic MongoDB TTL deletion (optional but useful)
 uploadSchema.index({ expiresAt: 1 }, { expireAfterSeconds: 0 });
 
 const User = mongoose.model('User', userSchema);
@@ -157,7 +137,6 @@ const storage = multer.diskStorage({
     cb(null, `${Date.now()}-${Math.random().toString(36).substr(2, 9)}-${safe}`);
   }
 });
-
 const upload = multer({
   storage,
   limits: { fileSize: 150 * 1024 * 1024 },
@@ -183,6 +162,11 @@ const auth = async (req, res, next) => {
       return res.status(401).json({ success: false, message: 'Token is empty' });
     }
 
+    const tokenParts = token.split('.');
+    if (tokenParts.length !== 3) {
+      return res.status(401).json({ success: false, message: 'Invalid token format' });
+    }
+
     const decoded = jwt.verify(token, process.env.JWT_SECRET);
     const user = await User.findById(decoded.userId).select('-password');
 
@@ -204,6 +188,7 @@ const auth = async (req, res, next) => {
   }
 };
 
+// 👇 NEW: Admin middleware – must be used after auth
 const adminOnly = (req, res, next) => {
   if (req.user.role !== 'admin') {
     return res.status(403).json({ success: false, message: 'Admin access required' });
@@ -227,45 +212,15 @@ const updateStats = async (userId, orig, comp) => {
 };
 
 // ========== API ROUTES ==========
-
-// Root route
-app.get('/', (req, res) => {
-  res.json({
-    name: 'Online File Editor API',
-    version: '1.0.0',
-    status: 'running',
-    timestamp: new Date().toISOString(),
-    endpoints: {
-      health: 'GET /api/health',
-      register: 'POST /api/register',
-      login: 'POST /api/login',
-      profile: 'GET /api/profile',
-      process: 'POST /api/process',
-      history: 'GET /api/history'
-    }
-  });
-});
-
-// Health check
 app.get('/api/health', (req, res) => {
-  const dbState = mongoose.connection.readyState;
-  const dbStatus = {
-    0: 'disconnected',
-    1: 'connected',
-    2: 'connecting',
-    3: 'disconnecting'
-  }[dbState] || 'unknown';
-
   res.json({
     success: true,
     message: 'Server running',
-    db: dbStatus,
-    uptime: process.uptime(),
-    timestamp: new Date().toISOString()
+    db: 'OK'
   });
 });
 
-// Register
+// ----- REGISTER -----
 app.post('/api/register', async (req, res) => {
   try {
     const { username, email, password, fullName = '', company = '' } = req.body;
@@ -273,17 +228,12 @@ app.post('/api/register', async (req, res) => {
     if (!username || !email || !password) {
       return res.status(400).json({ success: false, message: 'Username, email, and password are required' });
     }
-    if (username.length < 3) {
-      return res.status(400).json({ success: false, message: 'Username must be at least 3 characters' });
-    }
-    if (password.length < 6) {
-      return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
-    }
+    if (username.length < 3) return res.status(400).json({ success: false, message: 'Username must be at least 3 characters' });
+    if (password.length < 6) return res.status(400).json({ success: false, message: 'Password must be at least 6 characters' });
 
     const existing = await User.findOne({
       $or: [{ email: email.toLowerCase() }, { username }]
     });
-
     if (existing) {
       return res.status(400).json({
         success: false,
@@ -296,7 +246,7 @@ app.post('/api/register', async (req, res) => {
       username,
       email: email.toLowerCase(),
       password: hashed,
-      role: 'user',
+      role: 'user', // default role
       profile: { fullName, company }
     });
 
@@ -313,7 +263,7 @@ app.post('/api/register', async (req, res) => {
         id: user._id,
         username: user.username,
         email: user.email,
-        role: user.role,
+        role: user.role, // 👈 include role
         profile: user.profile,
         stats: user.stats,
         preferences: user.preferences
@@ -325,7 +275,7 @@ app.post('/api/register', async (req, res) => {
   }
 });
 
-// Login
+// ----- LOGIN -----
 app.post('/api/login', async (req, res) => {
   try {
     const { email, password } = req.body;
@@ -356,7 +306,7 @@ app.post('/api/login', async (req, res) => {
         id: user._id,
         username: user.username,
         email: user.email,
-        role: user.role,
+        role: user.role, // 👈 include role
         profile: user.profile,
         stats: user.stats,
         preferences: user.preferences
@@ -368,7 +318,7 @@ app.post('/api/login', async (req, res) => {
   }
 });
 
-// Profile
+// ----- PROFILE -----
 app.get('/api/profile', auth, async (req, res) => {
   try {
     const files = await File.find({ ownerId: req.user._id });
@@ -386,7 +336,7 @@ app.get('/api/profile', auth, async (req, res) => {
         id: req.user._id,
         username: req.user.username,
         email: req.user.email,
-        role: req.user.role,
+        role: req.user.role, // 👈 include role
         profile: req.user.profile,
         preferences: req.user.preferences,
         stats
@@ -398,7 +348,7 @@ app.get('/api/profile', auth, async (req, res) => {
   }
 });
 
-// Update Profile
+// ----- UPDATE PROFILE -----
 app.put('/api/profile', auth, async (req, res) => {
   try {
     const updates = req.body;
@@ -440,7 +390,7 @@ app.put('/api/profile', auth, async (req, res) => {
         id: user._id,
         username: user.username,
         email: user.email,
-        role: user.role,
+        role: user.role, // 👈 include role
         profile: user.profile,
         preferences: user.preferences,
         stats
@@ -452,7 +402,55 @@ app.put('/api/profile', auth, async (req, res) => {
   }
 });
 
-// Process Files
+// ========== AUTHENTICATED FILE SERVING ==========
+
+// Serve temporary upload files (for preview) – only owner can access
+app.get('/api/uploads/:filename', auth, async (req, res) => {
+  try {
+    const filename = req.params.filename;
+    const upload = await Upload.findOne({ filename, ownerId: req.user._id });
+    if (!upload) {
+      return res.status(404).json({ success: false, message: 'File not found or expired' });
+    }
+
+    const filePath = path.join(uploadDir, filename);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ success: false, message: 'File missing from disk' });
+    }
+
+    res.setHeader('Content-Type', upload.mimeType);
+    res.setHeader('Content-Disposition', `inline; filename="${upload.originalName}"`);
+    res.sendFile(filePath);
+  } catch (err) {
+    console.error('Error serving upload:', err);
+    res.status(500).json({ success: false, message: 'Failed to serve file' });
+  }
+});
+
+// Serve processed files (permanent) – only owner can access
+app.get('/api/processed/:filename', auth, async (req, res) => {
+  try {
+    const filename = req.params.filename;
+    const file = await File.findOne({ filename, ownerId: req.user._id });
+    if (!file) {
+      return res.status(404).json({ success: false, message: 'Processed file not found' });
+    }
+
+    const filePath = path.join(processedDir, filename);
+    if (!fs.existsSync(filePath)) {
+      return res.status(404).json({ success: false, message: 'File missing from disk' });
+    }
+
+    res.setHeader('Content-Type', file.type);
+    res.setHeader('Content-Disposition', `inline; filename="${file.originalName}"`);
+    res.sendFile(filePath);
+  } catch (err) {
+    console.error('Error serving processed file:', err);
+    res.status(500).json({ success: false, message: 'Failed to serve file' });
+  }
+});
+
+// ----- PROCESS FILES -----
 app.post('/api/process', auth, upload.array('files'), async (req, res) => {
   try {
     const files = req.files;
@@ -470,27 +468,31 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
       });
     }
 
+    // ---------- PREVIEW BRANCH (UPDATED) ----------
     if (tool === 'preview') {
       const fileInfo = [];
       for (const f of files) {
-        const uploadRecord = await Upload.create({
+        // Store metadata in temporary Upload collection
+        const upload = await Upload.create({
           filename: f.filename,
           originalName: f.originalname,
           size: f.size,
           mimeType: f.mimetype,
           ownerId: req.user._id
+          // expiresAt uses default (1 hour)
         });
 
         fileInfo.push({
-          id: uploadRecord._id,
-          name: uploadRecord.originalName,
-          size: uploadRecord.size,
-          type: uploadRecord.mimeType,
-          url: `/api/uploads/${uploadRecord.filename}`,
-          expiresAt: uploadRecord.expiresAt
+          id: upload._id,
+          name: upload.originalName,
+          size: upload.size,
+          type: upload.mimeType,
+          url: `/api/uploads/${upload.filename}`,   // authenticated URL
+          expiresAt: upload.expiresAt
         });
       }
 
+      // Do NOT delete the files here; they will be cleaned up by TTL/background job
       return res.json({
         success: true,
         files: fileInfo,
@@ -498,6 +500,7 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
       });
     }
 
+    // ---------- PROCESSING TOOLS (compress, merge, convert, enhance) ----------
     if (tool === 'merge' && files.length < 2) {
       return res.status(400).json({ success: false, message: 'Merge requires at least 2 files' });
     }
@@ -618,6 +621,7 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
       mime = 'image/webp';
     }
 
+    // Save processed file metadata in permanent File collection
     const processed = await File.create({
       filename: path.basename(outPath),
       originalName: fileName,
@@ -633,7 +637,7 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
 
     res.json({
       success: true,
-      url: `/api/processed/${path.basename(outPath)}`,
+      url: `/api/processed/${path.basename(outPath)}`, // authenticated URL
       fileName,
       size: compSize,
       originalSize: origSize,
@@ -648,12 +652,11 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
       message: e.message || 'File processing failed'
     });
   } finally {
+    // Clean up the uploaded files from disk (they are no longer needed)
     if (req.files) {
       req.files.forEach(f => {
         try {
-          if (fs.existsSync(f.path)) {
-            fs.unlinkSync(f.path);
-          }
+          fs.unlinkSync(f.path);
         } catch (cleanupError) {
           console.warn('Cleanup error:', cleanupError.message);
         }
@@ -662,7 +665,7 @@ app.post('/api/process', auth, upload.array('files'), async (req, res) => {
   }
 });
 
-// History
+// ----- HISTORY -----
 app.get('/api/history', auth, async (req, res) => {
   try {
     const page = Math.max(1, parseInt(req.query.page) || 1);
@@ -688,7 +691,7 @@ app.get('/api/history', auth, async (req, res) => {
   }
 });
 
-// Download File
+// ----- DOWNLOAD FILE (forces download) -----
 app.get('/api/download/:filename', auth, async (req, res) => {
   try {
     const filename = req.params.filename;
@@ -719,53 +722,9 @@ app.get('/api/download/:filename', auth, async (req, res) => {
   }
 });
 
-// Serve temporary upload files
-app.get('/api/uploads/:filename', auth, async (req, res) => {
-  try {
-    const filename = req.params.filename;
-    const uploadRecord = await Upload.findOne({ filename, ownerId: req.user._id });
-    if (!uploadRecord) {
-      return res.status(404).json({ success: false, message: 'File not found or expired' });
-    }
+// ========== ADMIN ROUTES (NEW) ==========
 
-    const filePath = path.join(uploadDir, filename);
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ success: false, message: 'File missing from disk' });
-    }
-
-    res.setHeader('Content-Type', uploadRecord.mimeType);
-    res.setHeader('Content-Disposition', `inline; filename="${uploadRecord.originalName}"`);
-    res.sendFile(filePath);
-  } catch (err) {
-    console.error('Error serving upload:', err);
-    res.status(500).json({ success: false, message: 'Failed to serve file' });
-  }
-});
-
-// Serve processed files
-app.get('/api/processed/:filename', auth, async (req, res) => {
-  try {
-    const filename = req.params.filename;
-    const file = await File.findOne({ filename, ownerId: req.user._id });
-    if (!file) {
-      return res.status(404).json({ success: false, message: 'Processed file not found' });
-    }
-
-    const filePath = path.join(processedDir, filename);
-    if (!fs.existsSync(filePath)) {
-      return res.status(404).json({ success: false, message: 'File missing from disk' });
-    }
-
-    res.setHeader('Content-Type', file.type);
-    res.setHeader('Content-Disposition', `inline; filename="${file.originalName}"`);
-    res.sendFile(filePath);
-  } catch (err) {
-    console.error('Error serving processed file:', err);
-    res.status(500).json({ success: false, message: 'Failed to serve file' });
-  }
-});
-
-// Admin Routes
+// Get all users (admin only)
 app.get('/api/admin/users', auth, adminOnly, async (req, res) => {
   try {
     const users = await User.find().select('-password').sort({ createdAt: -1 });
@@ -776,22 +735,25 @@ app.get('/api/admin/users', auth, adminOnly, async (req, res) => {
   }
 });
 
+// Get all file processes (admin only) – includes user email via population
 app.get('/api/admin/file-processes', auth, adminOnly, async (req, res) => {
   try {
+    // Fetch all files and populate ownerId to get user email
     const processes = await File.find()
-      .populate('ownerId', 'email username')
+      .populate('ownerId', 'email username') // get email and username from User
       .sort({ createdAt: -1 });
 
+    // Transform to match expected structure for admin frontend
     const formatted = processes.map(proc => ({
       id: proc._id,
       userEmail: proc.ownerId?.email || 'Unknown',
       userName: proc.ownerId?.username || 'Unknown',
       fileName: proc.originalName,
       fileType: proc.type,
-      originalSize: (proc.size / (1024 * 1024)).toFixed(2),
+      originalSize: (proc.size / (1024 * 1024)).toFixed(2), // bytes to MB
       compressedSize: (proc.compressedSize / (1024 * 1024)).toFixed(2),
       processDate: proc.createdAt,
-      status: 'Completed',
+      status: 'Completed', // all processed files are completed
       tool: proc.toolUsed
     }));
 
@@ -802,30 +764,38 @@ app.get('/api/admin/file-processes', auth, adminOnly, async (req, res) => {
   }
 });
 
-// ========== BACKGROUND CLEANUP ==========
-const CLEANUP_INTERVAL = 60 * 60 * 1000;
-
+// ========== BACKGROUND CLEANUP OF EXPIRED UPLOADS ==========
+// Runs every hour to delete files older than 1 hour from disk
+// (MongoDB TTL will remove the documents automatically)
+const CLEANUP_INTERVAL = 60 * 60 * 1000; // 1 hour
 setInterval(async () => {
   try {
     const oneHourAgo = new Date(Date.now() - 60 * 60 * 1000);
+    
+    // Find upload documents older than 1 hour (they should already be removed by TTL,
+    // but we also clean up orphaned files just in case)
     const expiredUploads = await Upload.find({ createdAt: { $lt: oneHourAgo } });
     
-    for (const uploadRecord of expiredUploads) {
-      const filePath = path.join(uploadDir, uploadRecord.filename);
+    for (const upload of expiredUploads) {
+      const filePath = path.join(uploadDir, upload.filename);
       if (fs.existsSync(filePath)) {
         fs.unlinkSync(filePath);
-        console.log(`🧹 Deleted expired upload file: ${uploadRecord.filename}`);
+        console.log(`🧹 Deleted expired upload file: ${upload.filename}`);
       }
-      await uploadRecord.deleteOne();
+      // Also remove the document (in case TTL didn't fire)
+      await upload.deleteOne();
     }
 
+    // Additionally, scan the upload directory for files older than 1 hour
+    // that are not in the Upload collection (orphans)
     const files = await fs.promises.readdir(uploadDir);
     for (const file of files) {
       const filePath = path.join(uploadDir, file);
       const stat = await fs.promises.stat(filePath);
       if (stat.isFile() && (Date.now() - stat.mtimeMs) > 60 * 60 * 1000) {
-        const uploadRecord = await Upload.findOne({ filename: file });
-        if (!uploadRecord) {
+        // Check if it's still referenced in Upload
+        const upload = await Upload.findOne({ filename: file });
+        if (!upload) {
           await fs.promises.unlink(filePath);
           console.log(`🧹 Deleted orphaned upload file: ${file}`);
         }
@@ -836,37 +806,12 @@ setInterval(async () => {
   }
 }, CLEANUP_INTERVAL);
 
-// ========== 404 HANDLER ==========
-app.use((req, res) => {
-  res.status(404).json({ 
-    success: false, 
-    message: `Route not found: ${req.method} ${req.url}` 
-  });
-});
-
-// ========== ERROR HANDLING MIDDLEWARE ==========
-app.use((err, req, res, next) => {
-  console.error('Unhandled error:', err);
-  res.status(500).json({
-    success: false,
-    message: process.env.NODE_ENV === 'production' ? 'Internal server error' : err.message
-  });
-});
+// ========== NO CATCH‑ALL ROUTE (API ONLY) ==========
 
 // ========== START SERVER ==========
 const PORT = process.env.PORT || 5001;
-
 app.listen(PORT, () => {
-  console.log('\n🚀 Online File Editor Backend Started');
-  console.log(`📡 Server running on port: ${PORT}`);
-  console.log(`🌍 Environment: ${process.env.NODE_ENV || 'development'}`);
-  console.log(`🔗 API URL: http://localhost:${PORT}`);
-  console.log(`❤️  Health check: http://localhost:${PORT}/api/health`);
-  console.log(`📁 Upload directory: ${uploadDir}`);
-  console.log(`📁 Processed directory: ${processedDir}`);
-  console.log('\n✅ CORS enabled for:');
-  allowedOrigins.forEach(origin => console.log(`   - ${origin}`));
-  console.log('\n✅ Ready to accept connections\n');
-});
-
-export default app;
+  console.log('\n🚀Online-File-Editor Backend STARTED (MongoDB, API‑only mode)');
+  console.log(`   http://localhost:${PORT}`);
+  console.log(`   Health check: http://localhost:${PORT}/api/health`);
+}); 
