@@ -25,10 +25,11 @@ const allowedOrigins = [
   'http://localhost:5173',
   'http://localhost:5174',
   'http://localhost:3000',
-  'https://online-file-editor-frontend.onrender.com',
-  'https://online-file-editor-backend.onrender.com'
+  'https://online-file-editor-frontend-hegh.onrender.com',
+  'https://online-file-editor-backend-1.onrender.com'
 ];
 
+// Add production frontend URL if provided
 if (process.env.CLIENT_URL) {
   allowedOrigins.push(process.env.CLIENT_URL);
 }
@@ -39,7 +40,9 @@ if (process.env.RENDER_EXTERNAL_URL) {
 // CORS middleware
 app.use(cors({
   origin: function (origin, callback) {
+    // Allow requests with no origin (like mobile apps or curl requests)
     if (!origin) return callback(null, true);
+    
     if (allowedOrigins.includes(origin)) {
       callback(null, true);
     } else {
@@ -52,7 +55,7 @@ app.use(cors({
   allowedHeaders: ['Content-Type', 'Authorization']
 }));
 
-// Handle preflight requests - FIXED VERSION
+// Handle preflight requests
 app.options('/*', (req, res) => {
   res.header('Access-Control-Allow-Origin', req.headers.origin || '*');
   res.header('Access-Control-Allow-Methods', 'GET, POST, PUT, DELETE, OPTIONS');
@@ -79,14 +82,18 @@ const processedDir = path.join(__dirname, 'processed');
 // ========== MONGODB CONNECTION ==========
 const mongoUri = process.env.MONGODB_URI;
 if (!mongoUri) {
-  console.error('❌ MONGODB_URI is not defined in .env');
+  console.error('❌ MONGODB_URI is not defined in environment variables');
   process.exit(1);
 }
 
 dns.setServers(['8.8.8.8', '8.8.4.4']);
 
-mongoose.connect(mongoUri, { family: 4 })
-  .then(() => console.log('✅ MongoDB Connected'))
+mongoose.connect(mongoUri, {
+  family: 4,
+  serverSelectionTimeoutMS: 5000,
+  socketTimeoutMS: 45000
+})
+  .then(() => console.log('✅ MongoDB Connected Successfully'))
   .catch(err => {
     console.error('❌ MongoDB error:', err.message);
     process.exit(1);
@@ -230,8 +237,11 @@ app.get('/', (req, res) => {
     timestamp: new Date().toISOString(),
     endpoints: {
       health: 'GET /api/health',
+      register: 'POST /api/register',
       login: 'POST /api/login',
-      register: 'POST /api/register'
+      profile: 'GET /api/profile',
+      process: 'POST /api/process',
+      history: 'GET /api/history'
     }
   });
 });
@@ -250,6 +260,7 @@ app.get('/api/health', (req, res) => {
     success: true,
     message: 'Server running',
     db: dbStatus,
+    uptime: process.uptime(),
     timestamp: new Date().toISOString()
   });
 });
@@ -853,6 +864,8 @@ app.listen(PORT, () => {
   console.log(`❤️  Health check: http://localhost:${PORT}/api/health`);
   console.log(`📁 Upload directory: ${uploadDir}`);
   console.log(`📁 Processed directory: ${processedDir}`);
+  console.log('\n✅ CORS enabled for:');
+  allowedOrigins.forEach(origin => console.log(`   - ${origin}`));
   console.log('\n✅ Ready to accept connections\n');
 });
 
